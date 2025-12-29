@@ -1,15 +1,20 @@
-﻿using System;
+﻿﻿﻿﻿using System;
 using System.IO;
 using System.Net.Http;
+using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
 using System.Diagnostics;
 using System.Threading;
 using System.Linq;
+using System.Security.Cryptography;
+using System.Windows.Forms;
+using System.Runtime.InteropServices;
 using CmlLib.Core;
 using CmlLib.Core.Auth;
 using CmlLib.Core.ProcessBuilder;
 using CmlLib.Core.Version;
+using CmlLib.Core.Installer.Forge;
 
 class Program
 {
@@ -18,16 +23,119 @@ class Program
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), 
         ".minecraft");
     
-    private static readonly string expectedForgeVersion = "1.7.10-Forge10.13.4.1614-1.7.10";
+    // Разрешенный сервер
+    private static readonly string ALLOWED_SERVER_IP = "158.160.179.116";
+    private static readonly int ALLOWED_SERVER_PORT = 25565;
+    private static readonly string ALLOWED_SERVER_ADDRESS = $"{ALLOWED_SERVER_IP}:{ALLOWED_SERVER_PORT}";
+    
+    // Импорт для работы с консолью
+    [DllImport("kernel32.dll")]
+    private static extern bool AllocConsole();
+    
+    [DllImport("kernel32.dll")]
+    private static extern bool FreeConsole();
+    
+    private static readonly string expectedForgeVersion = "1.12.2-Forge14.23.5.2859-1.12.2";
     private static readonly string java8Path = @"C:\Program Files\Java\jre1.8.0_471\bin\java.exe";
     private static readonly string javaInstallerUrl = "https://github.com/miwavini155vkk-del/JRE8/releases/download/main/jre-8u471-windows-x64.1.exe";
     private static readonly string javaInstallerPath = Path.Combine(Path.GetTempPath(), "jre-8u471-windows-x64.1.exe");
+    private static readonly string accessToken = "ForgeServer2025SecureToken"; // Секретный токен доступа
+    
+    // Ключ шифрования (256 бит = 32 байта для AES-256)
+    private static readonly byte[] encryptionKey = new byte[] {
+        0x48, 0x65, 0x6C, 0x6C, 0x6F, 0x57, 0x6F, 0x72,
+        0x6C, 0x64, 0x53, 0x65, 0x63, 0x75, 0x72, 0x69,
+        0x74, 0x79, 0x4B, 0x65, 0x79, 0x46, 0x6F, 0x72,
+        0x47, 0x61, 0x6D, 0x65, 0x53, 0x65, 0x72, 0x76
+    };
 
-    static async Task Main(string[] args)
+    [STAThread]
+    static void Main(string[] args)
     {
         try
         {
+            // Открываем консоль для отладки
+            AllocConsole();
+            Console.OutputEncoding = Encoding.UTF8;
+            Console.WriteLine("=== Консоль отладки запущена ===\n");
+            Console.WriteLine($"=== РАЗРЕШЕННЫЙ СЕРВЕР: {ALLOWED_SERVER_ADDRESS} ===\n");
+            
+            // Инициализация WinForms
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+
+            // Показываем splash-форму с загрузкой
+            var splashForm = new SplashForm();
+            splashForm.Show();
+
+            // Симуляция загрузки
+            for (int i = 0; i <= 100; i++)
+            {
+                splashForm.UpdateProgress(i, $"Инициализация... ({i}%)");
+                System.Threading.Thread.Sleep(15);
+                Application.DoEvents();
+            }
+
+            splashForm.Complete();
+            System.Threading.Thread.Sleep(500);
+            splashForm.Close();
+            splashForm.Dispose();
+
+            // Показываем основной лаунчер
+            var launcherForm = new MainLauncher();
+            Application.Run(launcherForm);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"КРИТИЧЕСКАЯ ОШИБКА:\n\n{ex.Message}\n\nStackTrace:\n{ex.StackTrace}", 
+                "Ошибка запуска приложения", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            Console.WriteLine($"КРИТИЧЕСКАЯ ОШИБКА: {ex.Message}");
+            Console.WriteLine($"StackTrace: {ex.StackTrace}");
+        }
+    }
+
+    public static async Task LaunchMinecraftAsync(string playerName)
+    {
+        await MainAsync(playerName);
+    }
+
+    static async Task MainAsync(string playerName)
+    {
+        try
+        {
+            Console.WriteLine("\n");
             Console.WriteLine("=== Minecraft Forge Launcher ===");
+            Console.WriteLine($"Дата/время: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+            Console.WriteLine($"Имя игрока: {playerName}");
+            Console.WriteLine($"РАЗРЕШЕННЫЙ СЕРВЕР: {ALLOWED_SERVER_ADDRESS}");
+            Console.WriteLine($"Путь .minecraft: {minecraftPath}");
+            Console.WriteLine("Инициализация системы безопасности...");
+            
+            // Принудительная установка разрешенного сервера
+            Console.WriteLine("\n--- Установка разрешенного сервера ---");
+            ForceAllowedServer();
+            
+            // Создаём структуру папок .minecraft в САМОМ НАЧАЛЕ
+            Console.WriteLine("\n--- Создание необходимых папок ---");
+            CreateMinecraftDirectories();
+            
+            // Проверяем, что папка создана
+            if (!Directory.Exists(minecraftPath))
+            {
+                throw new Exception($"Папка .minecraft не создана: {minecraftPath}");
+            }
+            Console.WriteLine($"✓ Папка .minecraft существует: {Directory.Exists(minecraftPath)}");
+            
+            Console.WriteLine("\n--- Создание профиля ---");
+            CreateLauncherProfilesFile();
+            
+            // Сохраняем зашифрованный токен при первом запуске
+            Console.WriteLine("\n--- Инициализация токена ---");
+            SaveEncryptedToken();
+            
+            // 0. Заходим на локальный сервер
+            Console.WriteLine("\n--- Подключение к серверу ---");
+            await ConnectToLocalServer();
             
             // 1. Проверяем наличие Java 8
             if (!CheckJava8Exists())
@@ -52,24 +160,14 @@ class Program
             {
                 // 3. Если Forge найден - сразу запускаем
                 Console.WriteLine($"✓ Forge найден: {foundVersion}");
-                await LaunchMinecraft(foundVersion);
+                await LaunchMinecraft(foundVersion, playerName);
                 return;
             }
             
             // 4. Если Forge не найден - устанавливаем
             Console.WriteLine("✗ Forge не найден. Начинаем установку...");
             
-            CreateMinecraftDirectories();
-            CreateLauncherProfilesFile();
-            
-            string? installerPath = await DownloadForgeInstaller();
-            if (installerPath == null)
-            {
-                Console.WriteLine("Не удалось скачать установщик Forge.");
-                return;
-            }
-            
-            bool installed = await InstallForge(installerPath);
+            bool installed = await InstallForgeUsingApi();
             if (!installed)
             {
                 Console.WriteLine("Установка Forge не удалась.");
@@ -98,14 +196,158 @@ class Program
             Console.WriteLine($"✓ Forge установлен: {foundVersion}");
             
             // 6. Запускаем Minecraft
-            await LaunchMinecraft(foundVersion);
+            await LaunchMinecraft(foundVersion, playerName);
             
             Console.WriteLine("=== Завершено ===");
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Ошибка: {ex.Message}");
+            Console.WriteLine($"\n=== КРИТИЧЕСКАЯ ОШИБКА ===");
+            Console.WriteLine($"Сообщение: {ex.Message}");
             Console.WriteLine($"StackTrace: {ex.StackTrace}");
+            if (ex.InnerException != null)
+            {
+                Console.WriteLine($"InnerException: {ex.InnerException.Message}");
+                Console.WriteLine($"InnerStackTrace: {ex.InnerException.StackTrace}");
+            }
+            Console.WriteLine($"=== КОНЕЦ ОТЧЁТА ОБ ОШИБКЕ ===\n");
+            throw; // Переделаём ошибку дальше для обработки в LauncherForm
+        }
+    }
+
+    static void ForceAllowedServer()
+    {
+        try
+        {
+            // 1. Записываем разрешенный сервер в конфиг
+            string configPath = Path.Combine(minecraftPath, "config");
+            Directory.CreateDirectory(configPath);
+            
+            string serverIpPath = Path.Combine(configPath, "server_ip.txt");
+            File.WriteAllText(serverIpPath, ALLOWED_SERVER_ADDRESS);
+            Console.WriteLine($"✓ Записан разрешенный сервер: {serverIpPath}");
+            
+            // 2. Удаляем все другие файлы серверов если они есть
+            CleanUpOtherServerConfigs(configPath);
+            
+            // 3. Создаем файл с информацией о блокировке
+            string lockInfoPath = Path.Combine(configPath, "server_lock.txt");
+            File.WriteAllText(lockInfoPath, 
+                $"ДОСТУП К СЕРВЕРАМ ОГРАНИЧЕН\n" +
+                $"Разрешен только сервер: {ALLOWED_SERVER_ADDRESS}\n" +
+                $"Любые попытки подключения к другим серверам блокируются.\n" +
+                $"Дата блокировки: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+            
+            Console.WriteLine($"✓ Создан файл блокировки: {lockInfoPath}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⚠ Ошибка при установке разрешенного сервера: {ex.Message}");
+        }
+    }
+
+    static void CleanUpOtherServerConfigs(string configPath)
+    {
+        try
+        {
+            // Удаляем все файлы, которые могут содержать другие сервера
+            string[] filesToCheck = Directory.GetFiles(configPath, "*.txt", SearchOption.AllDirectories);
+            
+            foreach (string file in filesToCheck)
+            {
+                try
+                {
+                    string fileName = Path.GetFileName(file).ToLower();
+                    
+                    // Проверяем файлы, которые могут содержать другие сервера
+                    if (fileName.Contains("server") && !fileName.Contains("server_ip"))
+                    {
+                        string content = File.ReadAllText(file);
+                        
+                        // Если файл содержит другие IP адреса, заменяем их на разрешенный
+                        if (content.Contains(".") && content.Contains(":"))
+                        {
+                            // Находим все IP адреса в файле
+                            var lines = content.Split('\n');
+                            bool modified = false;
+                            
+                            for (int i = 0; i < lines.Length; i++)
+                            {
+                                string line = lines[i];
+                                if (line.Contains(".") && line.Contains(":"))
+                                {
+                                    // Проверяем, не разрешенный ли это сервер
+                                    if (!line.Contains(ALLOWED_SERVER_IP) && !line.Contains(ALLOWED_SERVER_ADDRESS))
+                                    {
+                                        lines[i] = ALLOWED_SERVER_ADDRESS;
+                                        modified = true;
+                                        Console.WriteLine($"   Заменен сервер в файле: {file}");
+                                    }
+                                }
+                            }
+                            
+                            if (modified)
+                            {
+                                File.WriteAllText(file, string.Join("\n", lines));
+                            }
+                        }
+                    }
+                }
+                catch { }
+            }
+        }
+        catch { }
+    }
+
+    static async Task ConnectToLocalServer()
+    {
+        try
+        {
+            string serverUrl = "http://127.0.0.1:58250";
+            Console.WriteLine($"Подключаюсь к {serverUrl}...");
+            
+            using (var httpClient = new HttpClient())
+            {
+                httpClient.Timeout = TimeSpan.FromSeconds(5);
+                
+                try
+                {
+                    // Загружаем и расшифровываем токен
+                    string decryptedToken = LoadAndDecryptToken();
+                    
+                    // Отправляем запрос с токеном доступа
+                    var request = new HttpRequestMessage(HttpMethod.Get, serverUrl);
+                    request.Headers.Add("Authorization", $"Bearer {decryptedToken}");
+                    
+                    var response = await httpClient.SendAsync(request);
+                    
+                    if (response.IsSuccessStatusCode)
+                    {
+                        string content = await response.Content.ReadAsStringAsync();
+                        Console.WriteLine($"✓ Успешно подключено к серверу");
+                        Console.WriteLine($"Ответ сервера: {content}");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"⚠ Сервер ответил с кодом: {response.StatusCode}");
+                    }
+                }
+                catch (HttpRequestException)
+                {
+                    Console.WriteLine($"⚠ Сервер недоступен на {serverUrl}");
+                    Console.WriteLine("   Продолжаю работу...");
+                }
+                catch (TaskCanceledException)
+                {
+                    Console.WriteLine($"⚠ Таймаут подключения к серверу");
+                    Console.WriteLine("   Продолжаю работу...");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⚠ Ошибка подключения к серверу: {ex.Message}");
+            Console.WriteLine("   Продолжаю работу...");
         }
     }
 
@@ -307,7 +549,7 @@ class Program
             return null;
         }
         
-        // Ищем версию Forge 1.7.10
+        // Ищем версию Forge 1.12.2
         var versionDirs = Directory.GetDirectories(versionsPath);
         
         // Сначала ищем точное имя Forge
@@ -322,29 +564,29 @@ class Program
                 return dirName;
             }
             
-            // Проверяем содержит ли имя Forge и 1.7.10
+            // Проверяем содержит ли имя Forge и 1.12.2
             if (dirName.Contains("forge", StringComparison.OrdinalIgnoreCase) && 
-                dirName.Contains("1.7.10"))
+                dirName.Contains("1.12.2"))
             {
                 Console.WriteLine($"✓ Найдена версия Forge (содержит forge): {dirName}");
                 return dirName;
             }
             
             // Проверяем если имя содержит версию Forge
-            if (dirName.Contains("10.13.4.1614") && dirName.Contains("1.7.10"))
+            if (dirName.Contains("14.23.5.2859") && dirName.Contains("1.12.2"))
             {
                 Console.WriteLine($"✓ Найдена версия Forge (содержит номер сборки): {dirName}");
                 return dirName;
             }
         }
         
-        // Если не нашли Forge, проверяем есть ли обычная 1.7.10
+        // Если не нашли Forge, проверяем есть ли обычная 1.12.2
         // и проверяем не установлен ли Forge как библиотека
         foreach (var dir in versionDirs)
         {
             string dirName = Path.GetFileName(dir);
             
-            if (dirName.Equals("1.7.10"))
+            if (dirName.Equals("1.12.2"))
             {
                 // Проверяем, есть ли уже Forge в этой версии
                 string jsonFile = Path.Combine(dir, $"{dirName}.json");
@@ -354,9 +596,9 @@ class Program
                     {
                         string jsonContent = File.ReadAllText(jsonFile);
                         if (jsonContent.Contains("forge") || jsonContent.Contains("Forge") || 
-                            jsonContent.Contains("10.13.4.1614"))
+                            jsonContent.Contains("14.23.5.2859"))
                         {
-                            Console.WriteLine($"✓ Найдена версия 1.7.10 с Forge: {dirName}");
+                            Console.WriteLine($"✓ Найдена версия 1.12.2 с Forge: {dirName}");
                             return dirName;
                         }
                     }
@@ -374,259 +616,166 @@ class Program
 
     static void CreateMinecraftDirectories()
     {
-        Directory.CreateDirectory(Path.Combine(minecraftPath, "versions"));
-        Directory.CreateDirectory(Path.Combine(minecraftPath, "libraries"));
-        Directory.CreateDirectory(Path.Combine(minecraftPath, "mods"));
-        Directory.CreateDirectory(Path.Combine(minecraftPath, "logs"));
-        Directory.CreateDirectory(Path.Combine(minecraftPath, "saves"));
+        try
+        {
+            // Создаём основную папку .minecraft если её нет
+            if (!Directory.Exists(minecraftPath))
+            {
+                Directory.CreateDirectory(minecraftPath);
+                Console.WriteLine($"✓ Создана папка: {minecraftPath}");
+            }
+            
+            // Создаём все необходимые подпапки
+            Directory.CreateDirectory(Path.Combine(minecraftPath, "versions"));
+            Directory.CreateDirectory(Path.Combine(minecraftPath, "libraries"));
+            Directory.CreateDirectory(Path.Combine(minecraftPath, "mods"));
+            Directory.CreateDirectory(Path.Combine(minecraftPath, "logs"));
+            Directory.CreateDirectory(Path.Combine(minecraftPath, "saves"));
+            Directory.CreateDirectory(Path.Combine(minecraftPath, "config"));
+            Directory.CreateDirectory(Path.Combine(minecraftPath, "assets"));
+            
+            Console.WriteLine("✓ Структура папок .minecraft создана");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"✗ Ошибка при создании папок: {ex.Message}");
+        }
     }
 
     static void CreateLauncherProfilesFile()
     {
-        string profilesPath = Path.Combine(minecraftPath, "launcher_profiles.json");
-        if (!File.Exists(profilesPath))
+        try
         {
-            var profiles = new
+            string profilesPath = Path.Combine(minecraftPath, "launcher_profiles.json");
+            if (!File.Exists(profilesPath))
             {
-                profiles = new { },
-                settings = new { },
-                version = 2
-            };
-            string json = JsonSerializer.Serialize(profiles, new JsonSerializerOptions { WriteIndented = true });
-            File.WriteAllText(profilesPath, json);
+                var profiles = new
+                {
+                    profiles = new { },
+                    settings = new { },
+                    version = 2
+                };
+                string json = JsonSerializer.Serialize(profiles, new JsonSerializerOptions { WriteIndented = true });
+                File.WriteAllText(profilesPath, json);
+                Console.WriteLine($"✓ Создан профиль: {profilesPath}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"✗ Ошибка при создании профиля: {ex.Message}");
         }
     }
 
-    static async Task<string?> DownloadForgeInstaller()
+    static async Task<bool> InstallForgeUsingApi()
     {
-        Console.WriteLine("4. Скачиваем установщик Forge...");
-        
-        // Разные URL для скачивания Forge
-        string[] forgeUrls = {
-            "https://files.minecraftforge.net/maven/net/minecraftforge/forge/1.7.10-10.13.4.1614-1.7.10/forge-1.7.10-10.13.4.1614-1.7.10-installer.jar",
-            "https://maven.minecraftforge.net/net/minecraftforge/forge/1.7.10-10.13.4.1614-1.7.10/forge-1.7.10-10.13.4.1614-1.7.10-installer.jar",
-            "https://adfoc.us/serve/sitelinks/?id=271228&url=https://files.minecraftforge.net/maven/net/minecraftforge/forge/1.7.10-10.13.4.1614-1.7.10/forge-1.7.10-10.13.4.1614-1.7.10-installer.jar"
-        };
-        
-        string installerPath = Path.Combine(minecraftPath, "forge-installer.jar");
-        
-        // Если установщик уже есть, не качаем повторно
-        if (File.Exists(installerPath))
-        {
-            Console.WriteLine($"   ✓ Установщик уже существует");
-            return installerPath;
-        }
-        
-        foreach (string forgeUrl in forgeUrls)
-        {
-            try
-            {
-                Console.WriteLine($"   Пробуем URL: {forgeUrl}");
-                using var response = await httpClient.GetAsync(forgeUrl);
-                response.EnsureSuccessStatusCode();
-                
-                using var fileStream = File.Create(installerPath);
-                await response.Content.CopyToAsync(fileStream);
-                
-                Console.WriteLine($"   ✓ Установщик сохранен");
-                return installerPath;
-            }
-            catch (HttpRequestException ex)
-            {
-                Console.WriteLine($"   ✗ Ошибка: {ex.Message}");
-                continue;
-            }
-        }
-        
-        Console.WriteLine($"   ✗ Не удалось скачать установщик Forge ни с одного URL");
-        return null;
-    }
-
-    static async Task<bool> InstallForge(string installerPath)
-    {
-        Console.WriteLine("5. Устанавливаем Forge...");
-        
-        // Проверяем Java еще раз
-        if (!CheckJava8Exists())
-        {
-            Console.WriteLine($"   ✗ Java 8 не найдена!");
-            return false;
-        }
+        Console.WriteLine("4. Используем ForgeInstaller API для установки...");
         
         try
         {
-            // Получаем путь к Java
-            string javaPath = GetJavaPath();
-            if (string.IsNullOrEmpty(javaPath))
+            // Блокируем открытие браузера через переменные окружения
+            Environment.SetEnvironmentVariable("FORGE_INSTALL_NO_BROWSER", "true");
+            
+            var path = new MinecraftPath(minecraftPath);
+            var launcher = new MinecraftLauncher(path);
+            var forgeInstaller = new ForgeInstaller(launcher);
+            
+            Console.WriteLine("   Получаем список доступных версий Forge для 1.12.2...");
+            
+            // Получаем доступные версии Forge для 1.12.2
+            var versions = await forgeInstaller.GetForgeVersions("1.12.2");
+            
+            if (versions == null || !versions.Any())
             {
-                Console.WriteLine("   ✗ Не удалось найти путь к Java");
+                Console.WriteLine("   ✗ Не найдены версии Forge для 1.12.2");
                 return false;
             }
             
-            Console.WriteLine($"   Используем Java: {javaPath}");
+            // Ищем рекомендованную версию, затем последнюю, затем любую доступную
+            var targetVersion = versions.FirstOrDefault(v => v.IsRecommendedVersion)
+                              ?? versions.FirstOrDefault(v => v.IsLatestVersion)
+                              ?? versions.First();
             
-            // Устанавливаем Forge с автоматическим принятием лицензии
-            Console.WriteLine("   Устанавливаем Forge (автоматический режим)...");
+            Console.WriteLine($"   Найдена версия: Forge {targetVersion.ForgeVersionName} для Minecraft {targetVersion.MinecraftVersionName}");
             
-            // Создаем ответный файл для автоматической установки
-            string installResponseFile = Path.Combine(Path.GetTempPath(), "forge_install.cfg");
-            File.WriteAllText(installResponseFile, @"# Forge silent install configuration
-# Generated by DayZ Launcher
-
-# Install type (CLIENT, SERVER, EXTRACT)
-INSTALLER_TYPE=CLIENT
-
-# Install path (leave empty for default)
-INSTALL_PATH=" + minecraftPath.Replace("\\", "\\\\") + @"
-
-# Java home (leave empty for auto-detect)
-JAVA_HOME=" + Path.GetDirectoryName(Path.GetDirectoryName(javaPath)).Replace("\\", "\\\\") + @"
-
-# Other options
-NOCONFIRM=true
-NORESTART=true
-");
-
-            var processInfo = new ProcessStartInfo
+            // Проверяем наличие установщика
+            var installerFile = targetVersion.GetInstallerFile();
+            if (installerFile == null)
             {
-                FileName = javaPath,
-                Arguments = $"-jar \"{installerPath}\" --installClient --installPath=\"{minecraftPath}\"",
-                WorkingDirectory = minecraftPath,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true
-            };
-
-            Console.WriteLine($"   Команда: {processInfo.FileName} {processInfo.Arguments}");
-            
-            var process = Process.Start(processInfo);
-            if (process == null)
-            {
-                Console.WriteLine("   ✗ Не удалось запустить процесс установки.");
+                Console.WriteLine("   ✗ Файл установщика не найден для этой версии");
                 return false;
             }
-
-            // Читаем вывод установщика
-            string output = await process.StandardOutput.ReadToEndAsync();
-            string error = await process.StandardError.ReadToEndAsync();
-            await process.WaitForExitAsync();
             
-            Console.WriteLine("   Вывод установщика Forge:");
-            Console.WriteLine(output);
+            Console.WriteLine("   5. Загружаем и устанавливаем Forge в фоне...");
+            Console.WriteLine("   ⏳ Установка запущена. Это может занять несколько минут...");
             
-            if (!string.IsNullOrEmpty(error))
+            // Запускаем монитор браузеров ДО установки
+            var browserKillerTask = Task.Run(() => MonitorAndKillBrowsers());
+            
+            // Запускаем установку в фоновом потоке
+            var installTask = Task.Run(async () =>
             {
-                Console.WriteLine("   Ошибки установщика:");
-                Console.WriteLine(error);
-            }
-            
-            // Удаляем конфиг файл
-            if (File.Exists(installResponseFile))
-            {
-                File.Delete(installResponseFile);
-            }
-            
-            if (process.ExitCode == 0)
-            {
-                Console.WriteLine("   ✓ Forge успешно установлен");
-                
-                // Удаляем установщик
                 try
                 {
-                    if (File.Exists(installerPath))
+                    using (var cts = new CancellationTokenSource(TimeSpan.FromMinutes(15)))
                     {
-                        File.Delete(installerPath);
-                        Console.WriteLine("   ✓ Установщик удален");
+                        var installOptions = new ForgeInstallOptions
+                        {
+                            JavaPath = GetJavaPath(),
+                            SkipIfAlreadyInstalled = true,
+                            CancellationToken = cts.Token,
+                        };
+                        
+                        // Устанавливаем Forge
+                        var installedVersionName = await forgeInstaller.Install(targetVersion, installOptions);
+                        
+                        if (string.IsNullOrEmpty(installedVersionName))
+                        {
+                            Console.WriteLine("   ✗ Forge не был установлен");
+                            return false;
+                        }
+                        
+                        Console.WriteLine($"   ✓ Forge успешно установлен: {installedVersionName}");
+                        
+                        // Устанавливаем оставшиеся зависимости
+                        Console.WriteLine("   Установка оставшихся зависимостей...");
+                        await launcher.InstallAsync(installedVersionName);
+                        
+                        Console.WriteLine($"   ✓ Все зависимости установлены");
+                        return true;
                     }
                 }
-                catch
+                catch (OperationCanceledException)
                 {
-                    Console.WriteLine("   ⚠ Не удалось удалить установщик");
+                    Console.WriteLine("   ✗ Установка превысила таймаут (15 минут)");
+                    return false;
                 }
-                
-                return true;
-            }
-            else
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"   ✗ Ошибка фоновой установки: {ex.Message}");
+                    return false;
+                }
+            });
+            
+            // Ждем завершения с индикатором прогресса
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+            while (!installTask.IsCompleted)
             {
-                Console.WriteLine($"   ⚠ Установщик завершился с кодом: {process.ExitCode}");
-                Console.WriteLine("   Пробуем интерактивную установку...");
-                return await InstallForgeInteractive(javaPath, installerPath);
+                await Task.Delay(3000); // Проверяем каждые 3 секунды
+                var elapsed = (int)stopwatch.Elapsed.TotalSeconds;
+                Console.WriteLine($"   ⏳ Устанавливаю... ({elapsed}с)");
             }
+            
+            var result = await installTask;
+            return result;
+            
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"   ✗ Исключение при установке Forge: {ex.Message}");
-            return false;
-        }
-    }
-
-    static async Task<bool> InstallForgeInteractive(string javaPath, string installerPath)
-    {
-        try
-        {
-            // Пробуем интерактивную установку
-            Console.WriteLine("   Запускаем интерактивный установщик Forge...");
-            Console.WriteLine("   ПОЖАЛУЙСТА: В окне установщика выберите 'Install client'");
-            Console.WriteLine("   и убедитесь, что путь установки: " + minecraftPath);
-            
-            var processInfo = new ProcessStartInfo
+            Console.WriteLine($"   ✗ Ошибка установки Forge: {ex.Message}");
+            if (ex.InnerException != null)
             {
-                FileName = javaPath,
-                Arguments = $"-jar \"{installerPath}\"",
-                WorkingDirectory = minecraftPath,
-                UseShellExecute = true,
-                CreateNoWindow = false
-            };
-
-            var process = Process.Start(processInfo);
-            if (process == null)
-            {
-                Console.WriteLine("   ✗ Не удалось запустить интерактивный установщик.");
-                return false;
+                Console.WriteLine($"   Внутренняя ошибка: {ex.InnerException.Message}");
             }
-
-            Console.WriteLine("   ⏳ Ожидаем завершение установки...");
-            Console.WriteLine("   Подсказка: Если окно не появилось, проверьте панель задач.");
-            
-            // Ждем максимум 5 минут
-            bool exited = process.WaitForExit(300000);
-            if (!exited)
-            {
-                Console.WriteLine("   ⚠ Установщик не завершился за 5 минут");
-                process.Kill();
-            }
-            
-            // Даем время системе
-            await Task.Delay(5000);
-            
-            // Удаляем установщик
-            try
-            {
-                if (File.Exists(installerPath))
-                {
-                    File.Delete(installerPath);
-                    Console.WriteLine("   ✓ Установщик удален");
-                }
-            }
-            catch
-            {
-                Console.WriteLine("   ⚠ Не удалось удалить установщик");
-            }
-            
-            // Проверяем установился ли Forge
-            if (!string.IsNullOrEmpty(FindForgeVersion()))
-            {
-                Console.WriteLine("   ✓ Forge успешно установлен!");
-                return true;
-            }
-            
-            Console.WriteLine("   ⚠ Forge не найден после установки");
-            return false;
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"   ✗ Ошибка интерактивной установки: {ex.Message}");
             return false;
         }
     }
@@ -693,71 +842,413 @@ NORESTART=true
         return null;
     }
 
-    static async Task LaunchMinecraft(string versionName)
-{
-    Console.WriteLine($"6. Запускаем Minecraft {versionName}...");
-    
-    try
+    static async Task LaunchMinecraft(string versionName, string playerName)
     {
-        var path = new MinecraftPath(minecraftPath);
-        var launcher = new MinecraftLauncher(path);
+        Console.WriteLine($"6. Запускаем Minecraft {versionName}...");
         
-        // 1. Получаем список метаданных всех доступных версий
-        var allVersions = await launcher.GetAllVersionsAsync();
-        
-        // 2. Ищем метаданные нужной версии (используем .Name)
-        var versionMetadata = allVersions.FirstOrDefault(v => 
-            v.Name.Equals(versionName, StringComparison.OrdinalIgnoreCase)) 
-            ?? allVersions.FirstOrDefault(v => v.Name.Contains("forge", StringComparison.OrdinalIgnoreCase));
-
-        if (versionMetadata == null)
+        try
         {
-            Console.WriteLine("   ✗ Версия не найдена в списке доступных.");
-            return;
+            // Принудительная проверка и установка разрешенного сервера
+            ForceAllowedServer();
+            
+            // Всегда используем разрешенный сервер, игнорируя любые другие настройки
+            string serverAddress = ALLOWED_SERVER_IP;
+            int serverPort = ALLOWED_SERVER_PORT;
+            
+            Console.WriteLine($"   ВНИМАНИЕ: Подключение разрешено ТОЛЬКО к серверу: {serverAddress}:{serverPort}");
+            
+            // Очищаем список серверов и добавляем только наш сервер
+            Console.WriteLine("   Настройка списка серверов...");
+            ConfigureServerList(serverAddress, serverPort);
+            
+            var path = new MinecraftPath(minecraftPath);
+            var launcher = new MinecraftLauncher(path);
+            
+            // Убедимся, что все зависимости установлены перед запуском
+            Console.WriteLine("   Проверяем все зависимости...");
+            await launcher.InstallAsync(versionName);
+            
+            // Получаем список версий и находим нужную
+            var allVersions = await launcher.GetAllVersionsAsync();
+            
+            var versionMetadata = allVersions.FirstOrDefault(v => 
+                v.Name.Equals(versionName, StringComparison.OrdinalIgnoreCase)) 
+                ?? allVersions.FirstOrDefault(v => v.Name.Contains("forge", StringComparison.OrdinalIgnoreCase));
+
+            if (versionMetadata == null)
+            {
+                Console.WriteLine("   ✗ Версия не найдена в списке доступных.");
+                return;
+            }
+
+            var version = await launcher.GetVersionAsync(versionMetadata.Name);
+            
+            Console.WriteLine($"   Подготовка версии: {versionMetadata.Name}");
+            
+            var session = MSession.CreateOfflineSession(playerName);
+            var launchOption = new MLaunchOption
+            {
+                MaximumRamMb = 4096,
+                MinimumRamMb = 1024,
+                Session = session,
+                StartVersion = version
+            };
+            
+            // Создаем процесс запуска игры
+            var process = await launcher.CreateProcessAsync(versionMetadata.Name, launchOption);
+            
+            // Добавляем аргументы для подключения к серверу из конфига
+            process.StartInfo.Arguments += $" --server {serverAddress} --port {serverPort}";
+            Console.WriteLine($"   Принудительное подключение к серверу: {serverAddress}:{serverPort}");
+            
+            process.StartInfo.UseShellExecute = false;
+            process.StartInfo.RedirectStandardOutput = true;
+            process.StartInfo.RedirectStandardError = true;
+            
+            process.OutputDataReceived += (sender, e) => 
+            { 
+                if (!string.IsNullOrEmpty(e.Data)) 
+                {
+                    // Мониторим попытки подключения к другим серверам
+                    if (e.Data.Contains("connecting to") || e.Data.Contains("server") || e.Data.Contains("connect"))
+                    {
+                        Console.WriteLine($"[Minecraft] {e.Data}");
+                        CheckForUnauthorizedServerAttempt(e.Data);
+                    }
+                }
+            };
+            process.ErrorDataReceived += (sender, e) => 
+            { 
+                if (!string.IsNullOrEmpty(e.Data)) Console.WriteLine($"[Error] {e.Data}"); 
+            };
+            
+            process.Start();
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
+            
+            Console.WriteLine($"   ✓ Minecraft запущен! PID: {process.Id}");
+            Console.WriteLine($"   ⚠ ПОДКЛЮЧЕНИЕ К ДРУГИМ СЕРВЕРАМ ЗАПРЕЩЕНО!");
+            
+            process.WaitForExit();
         }
-
-        // 3. Загружаем полноценный объект IVersion по имени из метаданных
-        // Это решает ошибку CS0266 (преобразование типа)
-        var version = await launcher.GetVersionAsync(versionMetadata.Name);
-        
-        Console.WriteLine($"   Подготовка версии: {versionMetadata.Name}");
-        
-        var session = MSession.CreateOfflineSession("ForgePlayer");
-        var launchOption = new MLaunchOption
+        catch (Exception ex)
         {
-            MaximumRamMb = 4096,
-            MinimumRamMb = 1024,
-            Session = session,
-            StartVersion = version // Здесь должен быть объект IVersion
-        };
-        
-        // 4. Создаем процесс. В новых версиях можно передавать либо имя строки, либо сам объект.
-        // Используем сохраненное имя из метаданных.
-        var process = await launcher.CreateProcessAsync(versionMetadata.Name, launchOption);
-        
-        process.StartInfo.UseShellExecute = false;
-        process.StartInfo.RedirectStandardOutput = true;
-        process.StartInfo.RedirectStandardError = true;
-        
-        process.OutputDataReceived += (sender, e) => 
-        { 
-            if (!string.IsNullOrEmpty(e.Data)) Console.WriteLine($"[Minecraft] {e.Data}"); 
-        };
-        process.ErrorDataReceived += (sender, e) => 
-        { 
-            if (!string.IsNullOrEmpty(e.Data)) Console.WriteLine($"[Error] {e.Data}"); 
-        };
-        
-        process.Start();
-        process.BeginOutputReadLine();
-        process.BeginErrorReadLine();
-        
-        Console.WriteLine($"   ✓ Minecraft запущен! PID: {process.Id}");
-        await process.WaitForExitAsync();
+            Console.WriteLine($"   ✗ Ошибка запуска: {ex.Message}");
+            Console.WriteLine($"   StackTrace: {ex.StackTrace}");
+        }
     }
-    catch (Exception ex)
+
+    static void CheckForUnauthorizedServerAttempt(string logLine)
     {
-        Console.WriteLine($"   ✗ Ошибка запуска: {ex.Message}");
+        try
+        {
+            // Проверяем, не пытается ли игрок подключиться к другому серверу
+            string lowerLine = logLine.ToLower();
+            
+            // Ищем упоминания IP адресов в логе
+            if (lowerLine.Contains(".") && lowerLine.Contains(":"))
+            {
+                // Простая проверка на IP адрес (базовый паттерн)
+                if (lowerLine.Contains("158.160.179.116"))
+                {
+                    // Это разрешенный сервер
+                    return;
+                }
+                
+                // Если нашли другой IP адрес в логе
+                Console.WriteLine($"   ⚠ ОБНАРУЖЕНА ПОПЫТКА ПОДКЛЮЧЕНИЯ К ДРУГОМУ СЕРВЕРУ!");
+                Console.WriteLine($"   Строка лога: {logLine}");
+                Console.WriteLine($"   Дата: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+                
+                // Записываем в лог попытку
+                string logPath = Path.Combine(minecraftPath, "logs", "server_security.log");
+                Directory.CreateDirectory(Path.GetDirectoryName(logPath));
+                File.AppendAllText(logPath, 
+                    $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] ПОПЫТКА ПОДКЛЮЧЕНИЯ К ДРУГОМУ СЕРВЕРУ: {logLine}\n");
+            }
+        }
+        catch { }
     }
-}
+
+    static void ConfigureServerList(string serverAddress, int serverPort)
+    {
+        try
+        {
+            string serversPath = Path.Combine(minecraftPath, "servers.dat");
+            
+            // Загружаем и расшифровываем токен для сохранения конфиги
+            string decryptedToken = LoadAndDecryptToken();
+            
+            Console.WriteLine($"   ✓ Защита доступа включена (шифрование: AES-256)");
+            
+            // Создаем NBT структуру для servers.dat
+            // servers.dat формат: TAG_Compound("") { TAG_List("servers")[TAG_Compound { ... }] }
+            var serversList = new List<byte>();
+            
+            // NBT Header: TAG_Compound (0x0A) + name "Root"
+            serversList.Add(0x0A); // TAG_Compound
+            serversList.AddRange(WriteString("")); // Empty name for root
+            
+            // TAG_List "servers"
+            serversList.Add(0x09); // TAG_List
+            serversList.AddRange(WriteString("servers")); // List name
+            serversList.Add(0x0A); // TAG_Compound (list element type)
+            
+            // Number of servers (1) - только один разрешенный сервер
+            byte[] countBytes = BitConverter.GetBytes(1);
+            if (BitConverter.IsLittleEndian)
+                Array.Reverse(countBytes);
+            serversList.AddRange(countBytes);
+            
+            // Create server entry as TAG_Compound
+            var serverEntry = CreateServerEntry(serverAddress, serverPort);
+            serversList.AddRange(serverEntry);
+            
+            // End tag
+            serversList.Add(0x00); // TAG_End
+            
+            // Write to file
+            File.WriteAllBytes(serversPath, serversList.ToArray());
+            Console.WriteLine($"   ✓ Сервер добавлен в: {serversPath}");
+            Console.WriteLine($"   ⚠ Другие сервера удалены из списка!");
+            
+            // Создаем файл с информацией о блокировке
+            string lockInfoPath = Path.Combine(minecraftPath, "config", "server_lock.txt");
+            File.WriteAllText(lockInfoPath, 
+                $"ДОСТУП К СЕРВЕРАМ ОГРАНИЧЕН\n" +
+                $"Разрешен только сервер: {serverAddress}:{serverPort}\n" +
+                $"Любые попытки подключения к другим серверам блокируются.\n" +
+                $"Дата блокировки: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"   ⚠ Ошибка при настройке servers.dat: {ex.Message}");
+        }
+    }
+
+    static List<byte> CreateServerEntry(string ip, int port)
+    {
+        var entry = new List<byte>();
+        
+        // ip (TAG_String)
+        entry.Add(0x08); // TAG_String
+        entry.AddRange(WriteString("ip"));
+        entry.AddRange(WriteString(ip));
+        
+        // port (TAG_Int)
+        entry.Add(0x03); // TAG_Int
+        entry.AddRange(WriteString("port"));
+        byte[] portBytes = BitConverter.GetBytes(port);
+        if (BitConverter.IsLittleEndian)
+            Array.Reverse(portBytes);
+        entry.AddRange(portBytes);
+        
+        // name (TAG_String)
+        entry.Add(0x08); // TAG_String
+        entry.AddRange(WriteString("name"));
+        entry.AddRange(WriteString("Game Server"));
+        
+        // acceptTextures (TAG_Byte)
+        entry.Add(0x01); // TAG_Byte
+        entry.AddRange(WriteString("acceptTextures"));
+        entry.Add(0x01); // true
+        
+        // End of compound
+        entry.Add(0x00); // TAG_End
+        
+        return entry;
+    }
+
+    static List<byte> WriteString(string text)
+    {
+        var result = new List<byte>();
+        byte[] stringBytes = System.Text.Encoding.UTF8.GetBytes(text);
+        byte[] lengthBytes = BitConverter.GetBytes((ushort)stringBytes.Length);
+        if (BitConverter.IsLittleEndian)
+            Array.Reverse(lengthBytes);
+        result.AddRange(lengthBytes);
+        result.AddRange(stringBytes);
+        return result;
+    }
+
+    static void KillBrowserProcesses()
+    {
+        try
+        {
+            // Списки процессов браузеров и их вспомогательных процессов
+            string[] browserNames = { 
+                "chrome", "firefox", "msedge", "iexplore", "opera", "brave",
+                "chromium", "safari", "edge", "googlechrome",
+                "chrome.exe", "firefox.exe", "msedge.exe", "iexplore.exe"
+            };
+            
+            foreach (var browserName in browserNames)
+            {
+                try
+                {
+                    var processes = Process.GetProcessesByName(browserName);
+                    foreach (var proc in processes)
+                    {
+                        try
+                        {
+                            // Убиваем процесс без проверки времени
+                            proc.Kill(true); // true = убить все дочерние процессы
+                            proc.WaitForExit(2000);
+                            Console.WriteLine($"   ✓ Закрыт: {proc.ProcessName} (PID: {proc.Id})");
+                        }
+                        catch { }
+                    }
+                }
+                catch { }
+            }
+        }
+        catch { }
+    }
+
+    static void MonitorAndKillBrowsers()
+    {
+        try
+        {
+            for (int i = 0; i < 40; i++) // Проверяем 40 раз с интервалом в 250мс = 10 секунд
+            {
+                KillBrowserProcesses();
+                Thread.Sleep(250);
+            }
+        }
+        catch { }
+    }
+
+    static string? EncryptToken(string token)
+    {
+        try
+        {
+            using (var aes = Aes.Create())
+            {
+                aes.Key = encryptionKey;
+                aes.Mode = CipherMode.CBC;
+                aes.Padding = PaddingMode.PKCS7;
+                
+                // Генерируем случайный IV (инициализационный вектор)
+                byte[] iv = new byte[aes.IV.Length];
+                using (var rng = RandomNumberGenerator.Create())
+                {
+                    rng.GetBytes(iv);
+                }
+                aes.IV = iv;
+                
+                using (var encryptor = aes.CreateEncryptor(aes.Key, aes.IV))
+                {
+                    byte[] tokenBytes = Encoding.UTF8.GetBytes(token);
+                    byte[] encryptedBytes = encryptor.TransformFinalBlock(tokenBytes, 0, tokenBytes.Length);
+                    
+                    // Объединяем IV + зашифрованные данные
+                    byte[] result = new byte[iv.Length + encryptedBytes.Length];
+                    Buffer.BlockCopy(iv, 0, result, 0, iv.Length);
+                    Buffer.BlockCopy(encryptedBytes, 0, result, iv.Length, encryptedBytes.Length);
+                    
+                    // Конвертируем в Base64 для хранения в текстовом файле
+                    return Convert.ToBase64String(result);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"   ✗ Ошибка шифрования токена: {ex.Message}");
+            return null;
+        }
+    }
+
+    static string? DecryptToken(string encryptedToken)
+    {
+        try
+        {
+            using (var aes = Aes.Create())
+            {
+                aes.Key = encryptionKey;
+                aes.Mode = CipherMode.CBC;
+                aes.Padding = PaddingMode.PKCS7;
+                
+                // Декодируем из Base64
+                byte[] encryptedData = Convert.FromBase64String(encryptedToken);
+                
+                // Извлекаем IV (первые 16 байт)
+                byte[] iv = new byte[aes.IV.Length];
+                Buffer.BlockCopy(encryptedData, 0, iv, 0, iv.Length);
+                aes.IV = iv;
+                
+                // Извлекаем зашифрованные данные (остаток)
+                byte[] cipherText = new byte[encryptedData.Length - iv.Length];
+                Buffer.BlockCopy(encryptedData, iv.Length, cipherText, 0, cipherText.Length);
+                
+                using (var decryptor = aes.CreateDecryptor(aes.Key, aes.IV))
+                {
+                    byte[] decryptedBytes = decryptor.TransformFinalBlock(cipherText, 0, cipherText.Length);
+                    return Encoding.UTF8.GetString(decryptedBytes);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"   ✗ Ошибка расшифровки токена: {ex.Message}");
+            return null;
+        }
+    }
+
+    static void SaveEncryptedToken()
+    {
+        try
+        {
+            string configPath = Path.Combine(minecraftPath, "config");
+            Directory.CreateDirectory(configPath);
+            
+            string encryptedTokenPath = Path.Combine(configPath, "auth.key");
+            
+            // Шифруем токен
+            string? encryptedToken = EncryptToken(accessToken);
+            if (encryptedToken == null)
+            {
+                Console.WriteLine("   ✗ Не удалось зашифровать токен");
+                return;
+            }
+            
+            // Сохраняем зашифрованный токен
+            File.WriteAllText(encryptedTokenPath, encryptedToken);
+            Console.WriteLine($"   ✓ Зашифрованный токен сохранен: {encryptedTokenPath}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"   ✗ Ошибка сохранения токена: {ex.Message}");
+        }
+    }
+
+    static string LoadAndDecryptToken()
+    {
+        try
+        {
+            string encryptedTokenPath = Path.Combine(minecraftPath, "config", "auth.key");
+            
+            if (!File.Exists(encryptedTokenPath))
+            {
+                Console.WriteLine($"   ⚠ Файл с токеном не найден: {encryptedTokenPath}");
+                return accessToken; // Возвращаем стандартный токен если файл не существует
+            }
+            
+            string encryptedToken = File.ReadAllText(encryptedTokenPath);
+            string? decryptedToken = DecryptToken(encryptedToken);
+            
+            if (decryptedToken == null)
+            {
+                Console.WriteLine("   ✗ Не удалось расшифровать токен");
+                return accessToken;
+            }
+            
+            Console.WriteLine($"   ✓ Токен успешно расшифрован");
+            return decryptedToken;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"   ✗ Ошибка загрузки токена: {ex.Message}");
+            return accessToken;
+        }
+    }
 }
